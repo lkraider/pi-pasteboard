@@ -201,6 +201,12 @@ export async function cleanupOldPasteFiles(options = {}) {
 	}
 }
 
+/**
+ * Remove expired submission directories.
+ *
+ * Uses the same lock pattern as cleanupOldPasteFiles: a per-directory
+ * .cleanup.lock file prevents concurrent cleanup races across Pi processes.
+ */
 export async function cleanupOldSubmissions(options = {}) {
 	const root = await ensurePasteboardRoot(options.root ?? DEFAULT_ROOT);
 	const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
@@ -216,29 +222,61 @@ export async function cleanupOldSubmissions(options = {}) {
 	}
 	if (!stat.isDirectory()) return { removed: 0 };
 
-	const uid = currentUid();
-	const entries = await readdir(submissionsDir, { withFileTypes: true });
-	let removed = 0;
-
-	for (const entry of entries) {
-		if (!entry.isDirectory()) continue;
-		const dirPath = join(submissionsDir, entry.name);
-		let dirStat;
+	// --- Lock acquisition (mirrors cleanupOldPasteFiles) ---
+	const lockPath = join(submissionsDir, ".cleanup.lock");
+	let lock;
+	try {
+		lock = await open(lockPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, FILE_MODE);
+	} catch (error) {
+		if (error?.code !== "EEXIST") throw error;
+		let lockStat;
 		try {
-			dirStat = await lstat(dirPath);
-		} catch (error) {
-			if (error?.code === "ENOENT") continue;
-			throw error;
+			lockStat = await lstat(lockPath);
+		} catch (statError) {
+			if (statError?.code === "ENOENT") {
+				lock = await open(lockPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, FILE_MODE).catch(() => null);
+				if (!lock) return { removed: 0, skipped: true };
+			} else {
+				throw statError;
+			}
 		}
-		if (uid !== undefined && dirStat.uid !== uid) continue;
-		if (nowMs - dirStat.mtimeMs < ttlMs) continue;
-		try {
-			await rm(dirPath, { recursive: true, force: true });
-			removed += 1;
-		} catch (error) {
-			if (error?.code !== "ENOENT") throw error;
+		if (lockStat && nowMs - lockStat.mtimeMs >= STALE_LOCK_MS) {
+			await unlink(lockPath).catch(() => undefined);
+			lock = await open(lockPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, FILE_MODE).catch(() => null);
+			if (!lock) return { removed: 0, skipped: true };
+		} else if (lockStat) {
+			return { removed: 0, skipped: true };
 		}
 	}
 
-	return { removed };
+	let removed = 0;
+	try {
+		const uid = currentUid();
+		const entries = await readdir(submissionsDir, { withFileTypes: true });
+
+		for (const entry of entries) {
+			if (!entry.isDirectory()) continue;
+			const dirPath = join(submissionsDir, entry.name);
+			let dirStat;
+			try {
+				dirStat = await lstat(dirPath);
+			} catch (error) {
+				if (error?.code === "ENOENT") continue;
+				throw error;
+			}
+			if (uid !== undefined && dirStat.uid !== uid) continue;
+			if (nowMs - dirStat.mtimeMs < ttlMs) continue;
+			try {
+				await rm(dirPath, { recursive: true, force: true });
+				removed += 1;
+			} catch (error) {
+				if (error?.code !== "ENOENT") throw error;
+			}
+		}
+
+		return { removed, skipped: false };
+	} finally {
+		await lock.close().catch(() => undefined);
+		await unlink(lockPath).catch(() => undefined);
+	}
 }

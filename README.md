@@ -65,14 +65,56 @@ The package manifest exposes `./src/index.ts` as a Pi extension.
 - Writes use same-directory temp files plus no-overwrite hard-link creation.
 - Cleanup is best-effort: old `sha256-*.txt` files and expired submission directories are removed on session start.
 - Default cleanup TTL is 7 days (`PI_PASTEBOARD_TTL_MS` may override). Default capture threshold is 32 KiB (`PI_PASTEBOARD_MIN_BYTES` may override).
+- The pasteboard root directory is `/tmp/pi-pasteboard` by default.  Override via `PI_PASTEBOARD_ROOT` env var.
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `PI_PASTEBOARD_ROOT` | `/tmp/pi-pasteboard` | Storage root directory |
+| `PI_PASTEBOARD_MIN_BYTES` | `32768` | Minimum byte threshold for v1 whole-input capture |
+| `PI_PASTEBOARD_TTL_MS` | `604800000` (7 days) | Retention period for paste files and submission dirs |
+| `PI_PASTEBOARD_DEBUG` | unset | When `1`, emits debug-level logs to stderr about mode selection, fallback decisions, and I/O operations |
+
+With `PI_PASTEBOARD_DEBUG=1`, the extension logs whether v2 segmented capture is active, why a fallback occurred, and per-capture metadata (byte counts, file paths).  Without it, only a transient TUI notification marks mode installation — no ongoing noise.
 
 ## Limitations
 
-- **Paste markers in typed text:** If a user types literal `[paste #N ...]` text AND a matching paste ID exists in the Map (vanishingly rare — pastes are cleared every submit), the typed text is misidentified as a paste marker. The marker regex requires `[paste #` followed by a digit and optional ` +N lines` or ` N chars` suffix, which is unlikely in natural typing.
-- **Small pastes (<10 lines, <1000 chars):** Pi never creates markers for small pastes — they stay inline in the typed text. These are invisible to segmentation and remain in the prompt.
-- **Fragility of runtime field access:** The `pastes` Map and `pasteCounter` are declared `private` in TypeScript but are regular JS fields at runtime. If Pi upstream changes these to ECMAScript `#private` fields, the custom editor wrapper falls back to v1 whole-input capture. The extension logs nothing on fallback — the `input` event handler is the safety net.
-- **Post-submit reconstruction is impossible:** Once markers are expanded and the pastes Map is cleared, there is no way to recover typed/paste boundaries. The editor wrapper is the sole interception window.
-- **Compatibility with other custom editors:** The wrapper composes with prior editor factories via `ctx.ui.getEditorComponent()`. If another extension installed a custom editor (e.g., vim mode), this wrapper delegates to it and then patches the result.
+### Paste marker misidentification
+
+If a user types literal `[paste #N ...]` text AND a matching paste ID exists in the Map (vanishingly rare — pastes are cleared every submit), the typed text is misidentified as a paste marker. The marker regex requires `[paste #` followed by a digit and optional ` +N lines` or ` N chars` suffix, which is unlikely in natural typing.
+
+### Small pastes
+
+Small pastes (<10 lines, <1000 chars): Pi never creates markers for small pastes — they stay inline in the typed text. These are invisible to segmentation and remain in the prompt.
+
+### Synchronous I/O latency
+
+Paste-segment files and the manifest are written **synchronously** inside the editor's `submitValue()` — the same call-path that runs the terminal render loop.  Each submission writes `N` paste files + one manifest.  On a local SSD with typical paste sizes (<1 MB each), this adds ~1–2 ms per file; a 5-paste submission might add <10 ms total, which is imperceptible.  On a slow or network filesystem the per-file latency could reach tens of milliseconds.
+
+To bound the worst case, the segmenter caps submissions at **50 segments** (files).  Exceeding the cap causes the patcher to fall back to v1 whole-input capture (one file).  This is a hard guardrail — the submission is NOT silently corrupted; the original markers expand normally and the v1 `input`-event handler captures the expanded text.
+
+### Runtime field fragility
+
+The `pastes` Map, `pasteCounter`, and `state` object are declared `private` in TypeScript but are regular JS fields at runtime.  If Pi upstream changes these to ECMAScript `#private` fields, `this.getText()` (public API) still works but `this.pastes` / `this.state.lines` become unreachable.  In that scenario the patcher falls back to v1 whole-input capture, and the transient notification (or debug log at `PI_PASTEBOARD_DEBUG=1`) documents the fallback reason.
+
+### Public API preference
+
+The patcher reads marker text via `this.getText()` (the public, documented method) rather than `this.state.lines.join("\n")`.  For writing transformed text back, it mutates `state.lines` directly rather than calling `this.setText()`.  The public `setText()` exists on the `Editor` class but triggers `onChange` and autocomplete side effects during the critical submit-interception window.  If a future Pi version makes `setText()` side-effect-free for this use case, the mutation can be switched to the public API.
+
+### Post-submit reconstruction impossible
+
+Once markers are expanded and the pastes Map is cleared, there is no way to recover typed/paste boundaries. The editor wrapper is the sole interception window.
+
+### Compatibility with other custom editors
+
+The wrapper composes with prior editor factories via `ctx.ui.getEditorComponent()`.  If another extension installed a custom editor (e.g., vim mode), this wrapper delegates to it and then patches the result.
+
+**Factory-replacement fragility:** If a third extension calls `ctx.ui.setEditorComponent()` AFTER pi-pasteboard installs its wrapper, the segmented capture is silently replaced.  There is no hook to detect being swapped out.  The v1 `input`-event fallback remains active regardless, so the worst outcome is falling back to whole-input mode mid-session.  This is a Pi API limitation — extensions cannot "stack" editor factories.
+
+### Pi version requirement
+
+v2 segmented capture requires `@earendil-works/pi-coding-agent` exporting the `CustomEditor` class (available since v0.15.0+).  The import is dynamic — on older Pi versions the extension loads without crashing, emits a warning notification, and runs in v1 whole-input-only mode.
 
 ## Conservative bypasses (v1 fallback)
 
@@ -91,7 +133,9 @@ These bypasses do not apply to v2 segmented capture — if the editor wrapper is
 ## Development
 
 ```bash
-npm test
+npm test          # run all tests
+npm run typecheck # TypeScript compilation check
+npm run lint      # alias for typecheck
 ```
 
 ## File layout

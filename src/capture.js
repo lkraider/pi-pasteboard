@@ -8,9 +8,10 @@ export function makeReferenceInstruction(path) {
 
 export function extensionOptionsFromEnv() {
 	return {
-		root: DEFAULT_ROOT,
+		root: process.env.PI_PASTEBOARD_ROOT || DEFAULT_ROOT,
 		minBytes: readPositiveIntegerEnv("PI_PASTEBOARD_MIN_BYTES", DEFAULT_MIN_BYTES),
 		ttlMs: readPositiveIntegerEnv("PI_PASTEBOARD_TTL_MS", DEFAULT_TTL_MS),
+		debug: !!process.env.PI_PASTEBOARD_DEBUG,
 	};
 }
 

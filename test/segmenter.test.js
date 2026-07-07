@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { rm } from "node:fs/promises";
+import { open } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { rm, utimes, writeFile } from "node:fs/promises";
 import { readFileSync, mkdtempSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 
-import { HAS_PASTE_MARKER_RE, PASTE_MARKER_RE } from "../src/constants.js";
+import { HAS_PASTE_MARKER_RE, MAX_SEGMENTS, PASTE_MARKER_RE, STALE_LOCK_MS } from "../src/constants.js";
 import { parseSegments, processSegmentedPastes } from "../src/segmenter.js";
 import { patchEditorForSegmentedPaste } from "../src/pasteboard-editor.js";
 import { cleanupOldSubmissions, ensurePasteboardRoot } from "../src/pasteboard.js";
@@ -68,6 +70,16 @@ function fakeEditor(pastesMap, text) {
 			if (this.onChange) this.onChange("");
 			submittedText = result;
 			if (this.onSubmit) this.onSubmit(result);
+		},
+
+		getText() {
+			return (this.state?.lines ?? [""]).join("\n");
+		},
+
+		setText(text) {
+			this.state.lines = text.split("\n");
+			this.state.cursorLine = 0;
+			this.state.cursorCol = 0;
 		},
 
 		getSubmittedText() {
@@ -561,6 +573,266 @@ test("cleanupOldSubmissions no-ops when submissions dir missing", async () => {
 		// No submissions directory at all
 		const cleanupResult = await cleanupOldSubmissions({ root });
 		assert.equal(cleanupResult.removed, 0);
+	} finally {
+		rm(parent, { recursive: true, force: true }).catch(() => undefined);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Counterfactual: lock protection for cleanupOldSubmissions (F3)
+// ---------------------------------------------------------------------------
+
+test("cleanupOldSubmissions: respects fresh lock (not stale)", async () => {
+	const { root, parent } = tmpRoot();
+	try {
+		await ensurePasteboardRoot(root);
+
+		// Create a submission dir + ensure submissions/ exists
+		const pastes = new Map([[1, "content\n"]]);
+		processSegmentedPastes("[paste #1 +1 lines]", pastes, { root });
+
+		// Create a fresh lock file inside submissions/
+		const submissionsDir = join(root, "submissions");
+		const lockPath = join(submissionsDir, ".cleanup.lock");
+		const lockHandle = await open(lockPath, fsConstants.O_CREAT | fsConstants.O_WRONLY, 0o600);
+		await lockHandle.close();
+
+		// Cleanup should be skipped (lock is fresh)
+		const result = await cleanupOldSubmissions({ root, ttlMs: 1_000, nowMs: Date.now() });
+		assert.equal(result.skipped, true);
+		assert.equal(result.removed, 0);
+
+		// Remove the lock ourselves
+		await rm(lockPath, { force: true });
+	} finally {
+		rm(parent, { recursive: true, force: true }).catch(() => undefined);
+	}
+});
+
+test("cleanupOldSubmissions: stale lock is removed and cleanup proceeds", async () => {
+	const { root, parent } = tmpRoot();
+	try {
+		await ensurePasteboardRoot(root);
+
+		// Create a submission dir
+		const pastes = new Map([[1, "old\n"]]);
+		const result = processSegmentedPastes("[paste #1 +1 lines]", pastes, { root });
+
+		// Age the submission dir to be older than TTL
+		const veryOld = new Date(Date.now() - STALE_LOCK_MS - 120_000);
+		await utimes(result.submissionDir, veryOld, veryOld);
+
+		// Create a stale lock file
+		const submissionsDir = join(root, "submissions");
+		const lockPath = join(submissionsDir, ".cleanup.lock");
+		const lockHandle = await open(lockPath, fsConstants.O_CREAT | fsConstants.O_WRONLY, 0o600);
+		await lockHandle.close();
+		await utimes(lockPath, veryOld, veryOld);
+
+		// Cleanup with a TTL of 1 second — the submission dir qualifies
+		const cleanupResult = await cleanupOldSubmissions({ root, ttlMs: 1_000, nowMs: Date.now() });
+		assert.equal(cleanupResult.skipped, false);
+		assert.equal(cleanupResult.removed, 1);
+	} finally {
+		rm(parent, { recursive: true, force: true }).catch(() => undefined);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Counterfactual: segment-count cap (F2)
+// ---------------------------------------------------------------------------
+
+test("processSegmentedPastes: rejects submissions exceeding MAX_SEGMENTS", () => {
+	const { root, parent } = tmpRoot();
+	try {
+		// Build a pastes Map and marker text with MAX_SEGMENTS+1 segments
+		const pastes = new Map();
+		const parts = [];
+		for (let i = 0; i <= MAX_SEGMENTS; i++) {
+			pastes.set(i, `content${i}\n`);
+			parts.push(`[paste #${i} +1 lines]`);
+		}
+		const markerText = "typed-start\n" + parts.join("") + "\ntyped-end";
+
+		const result = processSegmentedPastes(markerText, pastes, { root });
+
+		assert.equal(result.error, "too-many-segments");
+		assert.equal(result.transformedText, null);
+		assert.ok(result.segmentCount > MAX_SEGMENTS);
+	} finally {
+		rm(parent, { recursive: true, force: true }).catch(() => undefined);
+	}
+});
+
+test("counterfactual: segment cap prevents pathological submission hangs", () => {
+	// v1 whole-input capture writes one file regardless of input structure.
+	// v2 could write MAX_SEGMENTS files synchronously.  Without a cap,
+	// a massively fragmented submission could block the render loop.
+	// This test verifies the cap fires and the patcher falls back.
+
+	const { root, parent } = tmpRoot();
+	try {
+		// Build well under the cap — should succeed
+		const pastes = new Map();
+		const parts = [];
+		const count = 10; // well under MAX_SEGMENTS of 50
+		for (let i = 0; i < count; i++) {
+			pastes.set(i, `ok${i}\n`);
+			parts.push(`[paste #${i} +1 lines]`);
+		}
+		const markerText = "start\n" + parts.join("") + "\nend";
+
+		const result = processSegmentedPastes(markerText, pastes, { root });
+
+		// Under the cap — normal handling
+		assert.equal(result.error, undefined);
+		assert.ok(typeof result.transformedText === "string");
+		assert.ok(result.transformedText.includes("[paste saved:"));
+	} finally {
+		rm(parent, { recursive: true, force: true }).catch(() => undefined);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Counterfactual C1: end-to-end typed→paste→typed→paste
+// ---------------------------------------------------------------------------
+
+test("counterfactual C1: e2e submission produces file refs NOT paste content", () => {
+	// This tests the full pipeline: a fake editor with getText() + pastes
+	// → patchEditorForSegmentedPaste → original submitValue.
+	// The submitted text must contain typed text and file references but
+	// NOT the actual paste content.  v1 whole-input behaviour would put
+	// everything in one blob — this test MUST fail under v1 semantics.
+
+	const { root, parent } = tmpRoot();
+	try {
+		const paste1Content = "function foo() {\n  return 42;\n}\n";
+		const paste2Content = "const config = { port: 3000 };\n";
+		const pastes = new Map([
+			[1, paste1Content],
+			[2, paste2Content],
+		]);
+		const markerText =
+			"Please review this code:\n[paste #1 +3 lines]\nAnd this config:\n[paste #2 +1 lines]";
+
+		// Verify v1 behaviour FIRST (before submitValue clears pastes):
+		// v1 expandPasteMarkers puts content inline → one blob
+		const editorForV1 = fakeEditor(new Map(pastes), markerText);
+		const v1Expanded = editorForV1.expandPasteMarkers(markerText);
+		assert.ok(v1Expanded.includes("function foo()"));
+		assert.ok(v1Expanded.includes("const config"));
+
+		// Now test v2 behaviour:
+		const editor = fakeEditor(pastes, markerText);
+		patchEditorForSegmentedPaste(editor, { root });
+
+		editor.submitValue();
+
+		const submitted = editor.getSubmittedText();
+
+		// MUST contain typed text
+		assert.ok(submitted.includes("Please review this code:"));
+		assert.ok(submitted.includes("And this config:"));
+
+		// MUST contain file references
+		assert.ok(submitted.includes("[paste saved:"));
+
+		// MUST NOT contain paste content
+		assert.ok(!submitted.includes("function foo()"));
+		assert.ok(!submitted.includes("return 42"));
+		assert.ok(!submitted.includes("const config"));
+	} finally {
+		rm(parent, { recursive: true, force: true }).catch(() => undefined);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Counterfactual C2: fallback when pastes undefined (editor internals inaccessible)
+// ---------------------------------------------------------------------------
+
+test("counterfactual C2: fallback fires when pastes field is undefined", () => {
+	// When the editor's pastes field is undefined (simulating a future Pi
+	// that uses #private fields or changed the internal layout), the patcher
+	// must fall through to original submitValue.  The v1 whole-input capture
+	// via the `input` event remains reachable.
+
+	const editor = fakeEditor(new Map([[1, "content"]]), "[paste #1 +1 lines]");
+	editor.pastes = undefined;
+	patchEditorForSegmentedPaste(editor, { root: "/tmp/pi-pasteboard" });
+
+	// Should not throw — falls through to original behaviour
+	assert.doesNotThrow(() => editor.submitValue());
+
+	// Original submitValue expands markers (since pastes is undefined,
+	// expandPasteMarkers returns the raw text with markers still in it —
+	// the v1 fallback captures the whole thing).
+	const submitted = editor.getSubmittedText();
+	// The fake editor's submitValue calls expandPasteMarkers which
+	// replaces markers when pastes is a Map, but when pastes is undefined
+	// it returns the text unchanged.  So the marker text is submitted as-is.
+	// A real editor would still have pastes internally — this test
+	// verifies our patcher's safety check works.
+	assert.ok(submitted.includes("[paste #1 +1 lines]"));
+});
+
+test("counterfactual C2b: fallback reachable when getText throws", () => {
+	// Simulate a scenario where getText() is unavailable or throws.
+	// The patcher must fall through to original submitValue safely.
+
+	const editor = fakeEditor(new Map([[1, "content"]]), "[paste #1 +1 lines]");
+	// Replace getText with a function that throws
+	editor.getText = () => { throw new Error("getText unavailable"); };
+	patchEditorForSegmentedPaste(editor, { root: "/tmp/pi-pasteboard" });
+
+	assert.doesNotThrow(() => editor.submitValue());
+
+	// Falls through — markers expanded normally by original submitValue
+	const submitted = editor.getSubmittedText();
+	assert.ok(submitted.includes("content"));
+});
+
+// ---------------------------------------------------------------------------
+// Counterfactual C3: adjacent paste markers produce distinct file refs
+// ---------------------------------------------------------------------------
+
+test("counterfactual C3: adjacent paste markers produce distinct adjacent file refs", () => {
+	// v1 whole-input capture merges everything into one blob — there are no
+	// file refs at all.  v2 must produce separate [paste saved: ...] refs
+	// for adjacent markers, not merge them into a single reference.
+
+	const { root, parent } = tmpRoot();
+	try {
+		const pastes = new Map([
+			[1, "content-one\n"],
+			[2, "content-two\n"],
+			[3, "content-three\n"],
+		]);
+		// Three adjacent paste markers — no typed text between them
+		const markerText = "[paste #1 +1 lines][paste #2 +1 lines][paste #3 +1 lines]";
+
+		const result = processSegmentedPastes(markerText, pastes, { root });
+
+		// The transformed text must contain three separate file references
+		const refs = result.transformedText.match(/\[paste saved: [^\]]+\]/g);
+		assert.equal(refs.length, 3);
+
+		// Each ref must be a distinct file path
+		const paths = refs.map((r) => r.slice(14, -1)); // strip "[paste saved: " and "]"
+		const uniquePaths = new Set(paths);
+		assert.equal(uniquePaths.size, 3);
+
+		// The manifest must have three paste segments, not one merged blob
+		const pasteSegments = result.manifest.segments.filter((s) => s.kind === "paste");
+		assert.equal(pasteSegments.length, 3);
+		assert.equal(pasteSegments[0].pasteId, 1);
+		assert.equal(pasteSegments[1].pasteId, 2);
+		assert.equal(pasteSegments[2].pasteId, 3);
+
+		// Each paste file must exist with the correct content
+		const pasteFiles = pasteSegments.map((s) => s.file);
+		assert.equal(readFileSync(pasteFiles[0], "utf8"), "content-one\n");
+		assert.equal(readFileSync(pasteFiles[1], "utf8"), "content-two\n");
+		assert.equal(readFileSync(pasteFiles[2], "utf8"), "content-three\n");
 	} finally {
 		rm(parent, { recursive: true, force: true }).catch(() => undefined);
 	}

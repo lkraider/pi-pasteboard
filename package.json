@@ -15,7 +15,9 @@
     ]
   },
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
@@ -24,5 +26,8 @@
     "src",
     "README.md",
     "package.json"
-  ]
+  ],
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
 }

@@ -33,12 +33,19 @@ export function patchEditorForSegmentedPaste(editor, options = {}) {
 			return originalSubmitValue();
 		}
 
-		const stateLines = this.state?.lines;
-		if (!stateLines || !Array.isArray(stateLines)) {
+		// Use the public API to read marker-bearing text.  This is the
+		// documented way to get text before paste expansion; it avoids
+		// direct coupling to the private state.lines internal layout.
+		let markerText;
+		try {
+			markerText = this.getText();
+		} catch {
 			return originalSubmitValue();
 		}
 
-		const markerText = stateLines.join("\n");
+		if (typeof markerText !== "string" || markerText.length === 0) {
+			return originalSubmitValue();
+		}
 
 		// Fast bail-out: no paste markers in the text
 		if (!HAS_PASTE_MARKER_RE.test(markerText)) {
@@ -49,9 +56,21 @@ export function patchEditorForSegmentedPaste(editor, options = {}) {
 		try {
 			const result = processSegmentedPastes(markerText, pastes, { root });
 
+			// Segment-count cap exceeded — fall back to original behaviour
+			// so the v1 whole-input capture takes over.
+			if (result.error === "too-many-segments") {
+				return originalSubmitValue();
+			}
+
 			// Replace editor text with the transformed version.
-			// Mutate the existing state object so originalSubmitValue's read
-			// of this.state.lines.join("\n") picks up our transformed text.
+			// We mutate state.lines directly rather than calling setText()
+			// to avoid triggering onChange / autocomplete side effects during
+			// the submit interception window.  The public setText() method
+			// exists but would fire callbacks we don't want here.
+			const stateLines = this.state?.lines;
+			if (!stateLines || !Array.isArray(stateLines)) {
+				return originalSubmitValue();
+			}
 			this.state.lines = result.transformedText.split("\n");
 			this.state.cursorLine = 0;
 			this.state.cursorCol = 0;

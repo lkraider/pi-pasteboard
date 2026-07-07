@@ -6,6 +6,7 @@ export const HASH_FILE_RE = /^sha256-[a-f0-9]{64}\.txt$/;
 export const SUBMISSIONS_SUBDIR = "submissions";
 export const PASTE_MARKER_RE = /\[paste #(\d+)(?: \+(\d+) lines| (\d+) chars)?\]/g;
 export const HAS_PASTE_MARKER_RE = /\[paste #\d+/;
+export const MAX_SEGMENTS = 50;
 
 export function readPositiveIntegerEnv(name, fallback) {
 	const raw = process.env[name];
