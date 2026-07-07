@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, readdir, unlink, utimes } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, readdir, unlink, utimes } from "node:fs/promises";
 import { join } from "node:path";
-import { DEFAULT_ROOT, DEFAULT_TTL_MS, HASH_FILE_RE } from "./constants.js";
+import { DEFAULT_ROOT, DEFAULT_TTL_MS, HASH_FILE_RE, STALE_LOCK_MS } from "./constants.js";
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -120,7 +120,7 @@ export async function writePasteText(text, options = {}) {
 
 	try {
 		try {
-			await fsLinkNoOverwrite(tempPath, path);
+			await link(tempPath, path);
 			linked = true;
 			await fsyncDirectory(root);
 		} catch (error) {
@@ -140,11 +140,6 @@ export async function writePasteText(text, options = {}) {
 	}
 }
 
-async function fsLinkNoOverwrite(from, to) {
-	const { link } = await import("node:fs/promises");
-	await link(from, to);
-}
-
 export async function cleanupOldPasteFiles(options = {}) {
 	const root = await ensurePasteboardRoot(options.root ?? DEFAULT_ROOT);
 	const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
@@ -154,8 +149,25 @@ export async function cleanupOldPasteFiles(options = {}) {
 	try {
 		lock = await open(lockPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, FILE_MODE);
 	} catch (error) {
-		if (error?.code === "EEXIST") return { root, removed: 0, skipped: true };
-		throw error;
+		if (error?.code !== "EEXIST") throw error;
+		let lockStat;
+		try {
+			lockStat = await lstat(lockPath);
+		} catch (statError) {
+			if (statError?.code === "ENOENT") {
+				lock = await open(lockPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, FILE_MODE).catch(() => null);
+				if (!lock) return { root, removed: 0, skipped: true };
+			} else {
+				throw statError;
+			}
+		}
+		if (lockStat && nowMs - lockStat.mtimeMs >= STALE_LOCK_MS) {
+			await unlink(lockPath).catch(() => undefined);
+			lock = await open(lockPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, FILE_MODE).catch(() => null);
+			if (!lock) return { root, removed: 0, skipped: true };
+		} else if (lockStat) {
+			return { root, removed: 0, skipped: true };
+		}
 	}
 
 	let removed = 0;

@@ -2,6 +2,14 @@
 
 `pi-pasteboard` is a standalone Pi package that keeps very large interactive TUI submissions out of the model context. For eligible large input, it writes the exact submitted text to a private temp file and replaces the prompt with a short file-reference instruction.
 
+## How it hooks Pi (paste event vs. input event)
+
+Pi's built-in paste handling collapses large pasted text in the editor as `[paste #N +X lines]` markers. This is purely visual/display-level. On submit, Pi expands the markers and fires the `input` event with the **full, uncollapsed raw text**. Pi's current extension API does **not** expose a paste event, paste marker, or paste-segment metadata that extensions can hook directly.
+
+pi-pasteboard therefore hooks the `input` event (the only available extension surface) and uses a conservative size threshold (default 32 KiB) to decide when to redirect content to a pasteboard file. This is the only viable approach in the current Pi extension API.
+
+**Why not a simpler paste-event approach?** There is no `paste`, `beforePaste`, or `clipboard` event in Pi's extension API. The editor's paste-marker collapse is display-only and not exposed to extensions. Until Pi adds a paste-specific event or marker metadata on `InputEvent`, size-threshold heuristics on `input` are the best available strategy. The current approach is correct for v1.
+
 ## Install
 
 From a checkout:

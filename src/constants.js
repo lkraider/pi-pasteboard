@@ -1,6 +1,7 @@
 export const DEFAULT_ROOT = "/tmp/pi-pasteboard";
 export const DEFAULT_MIN_BYTES = 32 * 1024;
 export const DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const STALE_LOCK_MS = 10 * 60 * 1000;
 export const HASH_FILE_RE = /^sha256-[a-f0-9]{64}\.txt$/;
 
 export function readPositiveIntegerEnv(name, fallback) {

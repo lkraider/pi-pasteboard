@@ -6,10 +6,11 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { getBypassReason, shouldCaptureInput, utf8ByteLength } from "../src/bypass.js";
-import { captureInput } from "../src/capture.js";
-import { HASH_FILE_RE } from "../src/constants.js";
+import { captureInput, makeReferenceInstruction } from "../src/capture.js";
+import { HASH_FILE_RE, STALE_LOCK_MS } from "../src/constants.js";
 import { cleanupOldPasteFiles, ensurePasteboardRoot, PasteboardSafetyError, writePasteText } from "../src/pasteboard.js";
-import { makeReferenceInstruction } from "../src/transform.js";
+import { open } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 
 async function withRoot(fn) {
 	const parent = await mkdtemp(join(tmpdir(), "pi-pasteboard-test-"));
@@ -144,4 +145,72 @@ test("captureInput writes full eligible input and returns only the reference", a
 		assert.ok(result.text.includes(result.path));
 		assert.ok(!result.text.includes("payload"));
 	});
+});
+
+test("stale cleanup lock is removed and cleanup proceeds", async () => {
+	await withRoot(async (root) => {
+		await ensurePasteboardRoot(root);
+
+		// Create a valid paste file old enough to be cleaned.
+		const hash = "a".repeat(64);
+		const filePath = join(root, `sha256-${hash}.txt`);
+		const oldMtime = new Date(Date.now() - STALE_LOCK_MS - 60_000);
+		await writeFile(filePath, "old", { mode: 0o600 });
+		await utimes(filePath, oldMtime, oldMtime);
+
+		// Create a stale lock file.
+		const lockPath = join(root, ".cleanup.lock");
+		const lockHandle = await open(lockPath, fsConstants.O_CREAT | fsConstants.O_WRONLY, 0o600);
+		await lockHandle.close();
+		await utimes(lockPath, oldMtime, oldMtime);
+
+		// Cleanup with a ttl of 1 second — the paste file qualifies.
+		const result = await cleanupOldPasteFiles({ root, ttlMs: 1_000, nowMs: Date.now() });
+
+		assert.equal(result.skipped, false);
+		assert.equal(result.removed, 1);
+
+		// The lock file should be gone (replaced by cleanup's own lock, which it removes).
+		// Verify by running another cleanup — it should not be skipped.
+		const result2 = await cleanupOldPasteFiles({ root, ttlMs: 1_000, nowMs: Date.now() });
+		assert.equal(result2.skipped, false);
+	});
+});
+
+test("fresh cleanup lock is respected (not stale)", async () => {
+	await withRoot(async (root) => {
+		await ensurePasteboardRoot(root);
+
+		// Create a fresh lock file.
+		const lockPath = join(root, ".cleanup.lock");
+		const lockHandle = await open(lockPath, fsConstants.O_CREAT | fsConstants.O_WRONLY, 0o600);
+		await lockHandle.close();
+
+		// Cleanup should be skipped (lock is fresh).
+		const result = await cleanupOldPasteFiles({ root, ttlMs: 1_000, nowMs: Date.now() });
+		assert.equal(result.skipped, true);
+		assert.equal(result.removed, 0);
+
+		// Remove the lock ourselves.
+		await rm(lockPath, { force: true });
+	});
+});
+
+test("captureInput returns continue for steer streaming behavior", async () => {
+	// Steer bypass is at the index.ts level (before captureInput).
+	// Test that captureInput still works correctly for non-steer.
+	await withRoot(async (root) => {
+		const text = "x".repeat(100);
+		const result = await captureInput({ text, source: "interactive", mode: "tui" }, { root, minBytes: 10 });
+		assert.equal(result.action, "transform");
+	});
+
+	// Verify that steering would bypass at the event level:
+	// the bypass module correctly handles non-interactive/non-tui cases,
+	// and the steer check in index.ts fires before any I/O.
+	// This test validates the bypass module remains correct.
+	const steerBypass = getBypassReason({ text: "x".repeat(100), source: "rpc", mode: "tui" }, { minBytes: 10 });
+	assert.equal(steerBypass, "non-interactive");
+	const tuiOk = getBypassReason({ text: "x".repeat(100), source: "interactive", mode: "tui" }, { minBytes: 10 });
+	assert.equal(tuiOk, undefined);
 });

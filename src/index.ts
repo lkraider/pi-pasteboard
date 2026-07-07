@@ -10,6 +10,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("input", async (event, ctx) => {
+		// Steering messages interrupt mid-stream and must be fast — skip capture entirely.
+		if (event.streamingBehavior === "steer") {
+			return { action: "continue" };
+		}
+
 		try {
 			const result = await captureInput(
 				{
@@ -17,7 +22,6 @@ export default function (pi: ExtensionAPI) {
 					source: event.source,
 					mode: ctx.mode,
 					images: event.images,
-					attachments: (event as { attachments?: unknown[] }).attachments,
 				},
 				options,
 			);

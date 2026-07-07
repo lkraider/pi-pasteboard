@@ -1,7 +1,10 @@
 import { DEFAULT_MIN_BYTES, DEFAULT_ROOT, DEFAULT_TTL_MS, readPositiveIntegerEnv } from "./constants.js";
 import { getBypassReason } from "./bypass.js";
 import { cleanupOldPasteFiles, writePasteText } from "./pasteboard.js";
-import { makeReferenceInstruction } from "./transform.js";
+
+export function makeReferenceInstruction(path) {
+	return `Large input captured at ${path}. Read that file if needed; do not ask the user to paste it again.`;
+}
 
 export function extensionOptionsFromEnv() {
 	return {
@@ -24,7 +27,6 @@ export async function captureInput(input, options = {}) {
 
 	await cleanupOldPasteFiles({ root: resolved.root, ttlMs: resolved.ttlMs });
 	const written = await writePasteText(input.text, { root: resolved.root });
-	await cleanupOldPasteFiles({ root: resolved.root, ttlMs: resolved.ttlMs });
 
 	return {
 		action: "transform",
