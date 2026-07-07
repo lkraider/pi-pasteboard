@@ -1,0 +1,28 @@
+{
+  "name": "pi-pasteboard",
+  "version": "0.1.0",
+  "description": "Pi package that captures large interactive TUI inputs to a local temp pasteboard file.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pasteboard"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "package.json"
+  ]
+}
