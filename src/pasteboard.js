@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { chmod, link, lstat, mkdir, open, readFile, readdir, unlink, utimes } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, readdir, rm, unlink, utimes } from "node:fs/promises";
 import { join } from "node:path";
-import { DEFAULT_ROOT, DEFAULT_TTL_MS, HASH_FILE_RE, STALE_LOCK_MS } from "./constants.js";
+import { DEFAULT_ROOT, DEFAULT_TTL_MS, HASH_FILE_RE, STALE_LOCK_MS, SUBMISSIONS_SUBDIR } from "./constants.js";
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -199,4 +199,46 @@ export async function cleanupOldPasteFiles(options = {}) {
 		await lock.close().catch(() => undefined);
 		await unlink(lockPath).catch(() => undefined);
 	}
+}
+
+export async function cleanupOldSubmissions(options = {}) {
+	const root = await ensurePasteboardRoot(options.root ?? DEFAULT_ROOT);
+	const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
+	const nowMs = options.nowMs ?? Date.now();
+	const submissionsDir = join(root, SUBMISSIONS_SUBDIR);
+
+	let stat;
+	try {
+		stat = await lstat(submissionsDir);
+	} catch (error) {
+		if (error?.code === "ENOENT") return { removed: 0 };
+		throw error;
+	}
+	if (!stat.isDirectory()) return { removed: 0 };
+
+	const uid = currentUid();
+	const entries = await readdir(submissionsDir, { withFileTypes: true });
+	let removed = 0;
+
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		const dirPath = join(submissionsDir, entry.name);
+		let dirStat;
+		try {
+			dirStat = await lstat(dirPath);
+		} catch (error) {
+			if (error?.code === "ENOENT") continue;
+			throw error;
+		}
+		if (uid !== undefined && dirStat.uid !== uid) continue;
+		if (nowMs - dirStat.mtimeMs < ttlMs) continue;
+		try {
+			await rm(dirPath, { recursive: true, force: true });
+			removed += 1;
+		} catch (error) {
+			if (error?.code !== "ENOENT") throw error;
+		}
+	}
+
+	return { removed };
 }
