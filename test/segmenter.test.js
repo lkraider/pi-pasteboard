@@ -837,3 +837,95 @@ test("counterfactual C3: adjacent paste markers produce distinct adjacent file r
 		rm(parent, { recursive: true, force: true }).catch(() => undefined);
 	}
 });
+
+// ---------------------------------------------------------------------------
+// Property / edge-case: empty paste, Unicode, and out-of-order markers
+// ---------------------------------------------------------------------------
+
+test("processSegmentedPastes: empty paste content writes empty file with ref", () => {
+	// When a paste segment has empty content (""), the file must still be
+	// written (empty file) and the [paste saved:] ref emitted.  This
+	// property ensures zero-length content doesn't break the file-ref model.
+
+	const { root, parent } = tmpRoot();
+	try {
+		const pastes = new Map([[1, ""]]);
+		const markerText = "before [paste #1 0 chars] after";
+
+		const result = processSegmentedPastes(markerText, pastes, { root });
+
+		assert.ok(result.transformedText.includes("[paste saved:"));
+		assert.equal(result.manifest.segments[1].bytes, 0);
+		assert.equal(result.manifest.segments[1].lines, 0);
+
+		const pastePath = join(result.submissionDir, "paste-1.txt");
+		const content = readFileSync(pastePath, "utf8");
+		assert.equal(content, "");
+	} finally {
+		rm(parent, { recursive: true, force: true }).catch(() => undefined);
+	}
+});
+
+test("processSegmentedPastes: Unicode paste content round-trips correctly", () => {
+	// Paste content with multi-byte UTF-8 (emoji, CJK, combining chars)
+	// must be byte-exact in the file and have correct byte count in manifest.
+
+	const { root, parent } = tmpRoot();
+	try {
+		const unicodeContent = "Hello 🌍\n日本語\n表情\u0308\n";
+		const pastes = new Map([[1, unicodeContent]]);
+		const markerText = "[paste #1 +3 lines]";
+
+		const result = processSegmentedPastes(markerText, pastes, { root });
+
+		const pastePath = join(result.submissionDir, "paste-0.txt");
+		const fileContent = readFileSync(pastePath, "utf8");
+		assert.equal(fileContent, unicodeContent);
+		assert.equal(
+			result.manifest.segments[0].bytes,
+			Buffer.byteLength(unicodeContent, "utf8"),
+		);
+		assert.equal(result.manifest.segments[0].lines, 4);
+	} finally {
+		rm(parent, { recursive: true, force: true }).catch(() => undefined);
+	}
+});
+
+test("parseSegments: out-of-order marker IDs still produce correct segments", () => {
+	// Markers may appear in non-numeric order (e.g., paste #2 before #1).
+	// The segmenter must emit them in textual order, not sorted by ID.
+
+	const pastes = new Map([
+		[99, "first-in-text\n"],
+		[5, "second-in-text\n"],
+	]);
+	const text = "start\n[paste #99 +1 lines] mid [paste #5 +1 lines] end";
+
+	const segs = parseSegments(text, pastes);
+
+	assert.equal(segs.length, 5);
+	assert.equal(segs[0].kind, "typed"); // "start\n"
+	assert.equal(segs[1].kind, "paste");
+	assert.equal(segs[1].pasteId, 99);   // first marker
+	assert.equal(segs[2].kind, "typed"); // " mid "
+	assert.equal(segs[3].kind, "paste");
+	assert.equal(segs[3].pasteId, 5);    // second marker
+});
+
+test("parseSegments: Unicode marker text (typed text containing emoji) handled correctly", () => {
+	// Typed text with multi-byte characters between markers must be
+	// captured exactly in typed segments (no byte-offset errors).
+
+	const pastes = new Map([[1, "paste\n"]]);
+	// "😀" is 4 bytes in UTF-8; segmenter uses character-index operations
+	const text = "😀hello😀\n[paste #1 +1 lines]\n🎉";
+
+	const segs = parseSegments(text, pastes);
+
+	assert.equal(segs.length, 3);
+	assert.equal(segs[0].kind, "typed");
+	assert.equal(segs[0].text, "😀hello😀\n");
+	assert.equal(segs[1].kind, "paste");
+	assert.equal(segs[2].kind, "typed");
+	assert.equal(segs[2].text, "\n🎉");
+});

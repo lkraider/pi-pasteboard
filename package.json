@@ -9,6 +9,14 @@
     "pasteboard"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lkraider/pi-pasterboard"
+  },
+  "homepage": "https://github.com/lkraider/pi-pasterboard#readme",
+  "bugs": {
+    "url": "https://github.com/lkraider/pi-pasterboard/issues"
+  },
   "pi": {
     "extensions": [
       "./src/index.ts"
@@ -25,6 +33,7 @@
   "files": [
     "src",
     "README.md",
+    "LICENSE",
     "package.json"
   ],
   "devDependencies": {
