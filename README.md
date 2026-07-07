@@ -1,5 +1,7 @@
 # pi-pasteboard
 
+> **Keeps large pastes out of model context.** Segments typed text and pasted content at the TUI boundary, saves pastes as private local files, and gives the model file references instead of 100 KB paste blobs. Automatic, transparent, zero-config.
+
 `pi-pasteboard` is a standalone Pi package that keeps very large interactive TUI submissions out of the model context. It offers two capture strategies that activate automatically:
 
 - **v2 segmented (active by default):** Intercepts paste boundaries BEFORE marker expansion via a custom editor wrapper. Pastes are saved as individual private files; typed text stays inline. The model sees file references instead of huge paste blobs.
@@ -129,6 +131,34 @@ The v1 `input`-event handler passes input through unchanged when it is:
 - a steering message (`streamingBehavior === "steer"`).
 
 These bypasses do not apply to v2 segmented capture — if the editor wrapper is active, segmentation fires on every submit regardless of size/source (only large pastes have markers, so small submits are effectively no-ops).
+
+## Privacy
+
+- Paste contents are written **only** to local temp files on your machine. Nothing is sent to any external service.
+- Files are mode `0600` (v2 submissions) or `0600` (v1) — readable only by the file owner.
+- The submission root (`/tmp/pi-pasteboard`) is mode `0700` — no other user can list contents.
+- Paste content is **never** logged or stored in Pi's session history. Only the `[paste saved: <path>]` reference appears in the prompt.
+- The manifest JSON records metadata (byte counts, timestamps, segment order) but does **not** include the text of typed segments longer than a few characters.
+- Enable `PI_PASTEBOARD_DEBUG=1` only for troubleshooting — debug output includes file paths but still excludes paste content.
+
+## Cleanup
+
+Both v1 paste files and v2 submission directories are removed automatically on session start:
+
+- Files/directories older than the TTL (default 7 days) are deleted.
+- A `.cleanup.lock` file prevents concurrent cleanup from multiple Pi processes (stale locks expire after 10 minutes).
+- To force immediate cleanup without starting a session: delete files/directories manually under `/tmp/pi-pasteboard/`.
+- The root directory itself is NOT removed — only its contents.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| No `[paste saved:]` refs in prompt — just expanded text | Editor wrapper not installed or fell back. v1 whole-input may still fire for large inputs. | Run with `PI_PASTEBOARD_DEBUG=1` and check stderr for fallback reason. |
+| "CustomEditor unavailable" notification | Pi version too old (<0.15.0) | Update Pi; v1 fallback remains active. |
+| Submission feels laggy | Sync I/O on slow filesystem; many segments | Check `PI_PASTEBOARD_ROOT` isn't on a network drive. Segment cap (50) prevents worst case. |
+| Paste files not cleaned up | Stale lock or permission issue | Check `/tmp/pi-pasteboard/.cleanup.lock` and `/tmp/pi-pasteboard/submissions/.cleanup.lock`. Delete stuck lock files manually. |
+| Segmented capture stopped working mid-session | Another extension replaced the editor factory | This is a known limitation (see Limitations above). v1 fallback takes over. Restart session to reinstall. |
 
 ## Development
 

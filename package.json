@@ -11,11 +11,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/lkraider/pi-pasterboard"
+    "url": "https://github.com/lkraider/pi-pasteboard"
   },
-  "homepage": "https://github.com/lkraider/pi-pasterboard#readme",
+  "homepage": "https://github.com/lkraider/pi-pasteboard#readme",
   "bugs": {
-    "url": "https://github.com/lkraider/pi-pasterboard/issues"
+    "url": "https://github.com/lkraider/pi-pasteboard/issues"
   },
   "pi": {
     "extensions": [

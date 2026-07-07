@@ -207,6 +207,33 @@ test("parseSegments: bare marker without lines/chars suffix", () => {
 	assert.equal(segs[0].text, "content");
 });
 
+test("parseSegments: out-of-order marker IDs preserved in textual order", () => {
+	// Markers may appear in non-sorted numeric order (paste #99 before #5).
+	// The segmenter must emit them in textual order, not sorted by ID.
+	const pastes = new Map([
+		[99, "high-id-first\n"],
+		[5, "low-id-second\n"],
+	]);
+	const text = "start\n[paste #99 +1 lines] mid [paste #5 +1 lines] end";
+	const segs = parseSegments(text, pastes);
+
+	assert.equal(segs.length, 5);
+	assert.equal(segs[1].pasteId, 99);
+	assert.equal(segs[3].pasteId, 5);
+});
+
+test("parseSegments: Unicode typed text between markers preserved exactly", () => {
+	// Multi-byte UTF-8 characters in typed text must survive the segmenter
+	// character-offset tracking without corruption.
+	const pastes = new Map([[1, "paste\n"]]);
+	const text = "😀hello😀\n[paste #1 +1 lines]\n🎉";
+	const segs = parseSegments(text, pastes);
+
+	assert.equal(segs.length, 3);
+	assert.equal(segs[0].text, "😀hello😀\n");
+	assert.equal(segs[2].text, "\n🎉");
+});
+
 // ---------------------------------------------------------------------------
 // processSegmentedPastes (I/O)
 // ---------------------------------------------------------------------------
