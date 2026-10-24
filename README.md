@@ -14,7 +14,7 @@ Pi's editor collapses large pastes (>10 lines or >1000 chars) into display marke
 pi-pasteboard installs a custom editor wrapper on `session_start` via `ctx.ui.setEditorComponent()` that monkey-patches `submitValue()`. The wrapper reads marker-bearing text and the runtime `pastes` Map BEFORE expansion, then:
 
 1. Parses the marker text into ordered segments: `typed → paste → typed → paste → typed`.
-2. Saves each paste to a 0600 file under `/tmp/pi-pasteboard/submissions/<uuid>/paste-<N>.txt`.
+2. Saves each paste to a 0600 file under `/tmp/pi-pasteboard/submissions/<uuid>/paste-<id>.txt`, named after the paste id in its marker. Submissions whose referenced paste bytes total less than `PI_PASTEBOARD_MIN_PASTE_BYTES` (default 4 KiB) are left inline — see [Small pastes](#small-pastes-below-the-capture-floor).
 3. Writes a `manifest.json` with segment metadata (submission id, order, kind, file path, byte/line counts, timestamps, fallback reason if any).
 4. Replaces each paste marker with `[paste saved: <path>]` so the model can `read` the file.
 5. Lets the original submit flow continue — the model sees only short file references.
@@ -27,9 +27,9 @@ The model receives:
 
 ```
 Review this:
-[paste saved: /tmp/pi-pasteboard/submissions/<uuid>/paste-1.txt]
+[paste saved: /tmp/pi-pasteboard/submissions/<uuid>/paste-1.txt (500 lines, 18.2KB)]
 Thanks!
-[paste saved: /tmp/pi-pasteboard/submissions/<uuid>/paste-3.txt]
+[paste saved: /tmp/pi-pasteboard/submissions/<uuid>/paste-2.txt (200 lines, 4.1KB)]
 ```
 
 And can read each paste file individually via the `read` tool.
@@ -66,19 +66,84 @@ The package manifest exposes `./src/index.ts` as a Pi extension.
 - v2 paste files and manifests are mode `0600` under per-submission directories.
 - Writes use same-directory temp files plus no-overwrite hard-link creation.
 - Cleanup is best-effort: old `sha256-*.txt` files and expired submission directories are removed on session start.
-- Default cleanup TTL is 7 days (`PI_PASTEBOARD_TTL_MS` may override). Default capture threshold is 32 KiB (`PI_PASTEBOARD_MIN_BYTES` may override).
-- The pasteboard root directory is `/tmp/pi-pasteboard` by default.  Override via `PI_PASTEBOARD_ROOT` env var.
+- Default cleanup TTL is 7 days and the default v1 capture threshold is 32 KiB; both are configurable (see [Configuration](#configuration)).
+- The pasteboard root directory is `/tmp/pi-pasteboard` by default.
 
-## Environment variables
+## Configuration
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `PI_PASTEBOARD_ROOT` | `/tmp/pi-pasteboard` | Storage root directory |
-| `PI_PASTEBOARD_MIN_BYTES` | `32768` | Minimum byte threshold for v1 whole-input capture |
-| `PI_PASTEBOARD_TTL_MS` | `604800000` (7 days) | Retention period for paste files and submission dirs |
-| `PI_PASTEBOARD_DEBUG` | unset | When `1`, emits debug-level logs to stderr about mode selection, fallback decisions, and I/O operations |
+Every setting has a hard-coded default and can be overridden by a config file or an environment variable. Precedence, highest first:
 
-With `PI_PASTEBOARD_DEBUG=1`, the extension logs whether v2 segmented capture is active, why a fallback occurred, and per-capture metadata (byte counts, file paths).  Without it, only a transient TUI notification marks mode installation — no ongoing noise.
+1. **Environment variable** (`PI_PASTEBOARD_*`)
+2. **Config file**
+3. **Built-in default**
+
+The config file is `pi-pasteboard.json` in Pi's agent directory — `$PI_CODING_AGENT_DIR/pi-pasteboard.json`, i.e. `~/.pi/agent/pi-pasteboard.json` by default. Set `PI_PASTEBOARD_CONFIG=/path/to/file.json` to use a different file. All keys are optional; a missing file is normal and silently ignored.
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/lkraider/pi-pasteboard/main/pi-pasteboard.schema.json",
+  "minPasteBytes": 8192,
+  "maxSegments": 20,
+  "debug": false
+}
+```
+
+The `$schema` line is optional and only feeds editor autocomplete; use the URL above, or a path to a local copy of [`pi-pasteboard.schema.json`](pi-pasteboard.schema.json) (it is not installed next to the config file).
+
+| Key | Environment variable | Default | Purpose |
+|-----|---------------------|---------|---------|
+| `root` | `PI_PASTEBOARD_ROOT` | `/tmp/pi-pasteboard` | Storage root directory |
+| `minBytes` | `PI_PASTEBOARD_MIN_BYTES` | `32768` | Minimum byte threshold for v1 whole-input capture |
+| `minPasteBytes` | `PI_PASTEBOARD_MIN_PASTE_BYTES` | `4096` | v2 only: total referenced paste bytes below which pastes stay inline. `0` captures every paste. |
+| `maxSegments` | `PI_PASTEBOARD_MAX_SEGMENTS` | `50` | Maximum number of parsed segments (typed **and** paste) in one submission; above it v2 declines and falls back to v1 |
+| `ttlMs` | `PI_PASTEBOARD_TTL_MS` | `604800000` (7 days) | Retention period for paste files and submission dirs |
+| `inlineFormat` | `PI_PASTEBOARD_INLINE_FORMAT` | `spaced` | How a paste that stays inline appears in the prompt: `stock` or `spaced` |
+| `annotatePasteSize` | `PI_PASTEBOARD_ANNOTATE_SIZE` | `true` | Append `(812 lines, 45.6KB)` to each `[paste saved: …]` reference |
+| `debug` | `PI_PASTEBOARD_DEBUG` | `false` | Emit debug-level diagnostics to stderr |
+
+A JSON Schema ships as [`pi-pasteboard.schema.json`](pi-pasteboard.schema.json) for editor autocomplete and validation.
+
+### What a paste looks like in the prompt
+
+**Captured pastes** become a reference carrying the paste's size, so the model can judge whether it needs the whole thing:
+
+```
+Review this:
+[paste saved: /tmp/pi-pasteboard/submissions/<uuid>/paste-1.txt (812 lines, 45.6KB)]
+Thoughts?
+```
+
+Line and byte counts are cheap (~10 tokens) and turn "read the file" into an informed choice between `grep` and a full `read`. Set `"annotatePasteSize": false` to drop them.
+
+**Pastes below the capture floor** stay inline, and `inlineFormat` controls how they are laid out. Pi's own expansion substitutes content in place, which glues a paste to the text on either side:
+
+| `inlineFormat` | Result |
+|---|---|
+| `stock` | Pi's behaviour, unchanged: `Review this: config:…  thoughts?` |
+| `spaced` *(default)* | Paste becomes its own block with a blank line either side |
+
+```
+Review this:
+
+config:
+  port: 3000
+
+thoughts?
+```
+
+Typed text is otherwise preserved verbatim — the only edit is horizontal whitespace directly after a paste, which is an artifact of where the marker sat. There is deliberately no code-fence mode: blank-line separation already marks the block boundary, and fences have to be sized against backticks inside the paste to avoid terminating early.
+
+Formatting never costs content: if a marker is missing from Pi's paste map (stock expansion would leave the marker text in place) or the editor state is unavailable, the submission falls back to `stock` behaviour.
+
+### Config file validation
+
+The config file is read once per session and **fails soft**: this extension sits in the submit path of every prompt, so a typo must not disable paste capture. Invalid values are reported through a TUI notification (`pi-pasteboard: <reason>`) and on stderr when debugging is on, then that one field falls back to the next source in the precedence chain — a bad `PI_PASTEBOARD_MIN_PASTE_BYTES` falls back to the config file value, not to the built-in default. Unknown keys are reported and ignored.
+
+Environment values must be plain non-negative decimal integers; `0x10`, `1e3`, `Infinity` and `1.5` are rejected as invalid rather than silently coerced.
+
+### Debugging
+
+With `debug` enabled (or `PI_PASTEBOARD_DEBUG=1`), the extension logs the resolved config path, the effective option values, any config warnings, whether v2 segmented capture is active, why a fallback occurred, and per-capture metadata (byte counts, file paths). `PI_PASTEBOARD_DEBUG=0|false|no|off` turns debugging off again, which allows the environment to override `"debug": true` in the file. Without it, only a transient TUI notification marks mode installation — no ongoing noise.
 
 ## Limitations
 
@@ -86,15 +151,30 @@ With `PI_PASTEBOARD_DEBUG=1`, the extension logs whether v2 segmented capture is
 
 If a user types literal `[paste #N ...]` text AND a matching paste ID exists in the Map (vanishingly rare — pastes are cleared every submit), the typed text is misidentified as a paste marker. The marker regex requires `[paste #` followed by a digit and optional ` +N lines` or ` N chars` suffix, which is unlikely in natural typing.
 
-### Small pastes
+### Small pastes (below the capture floor)
 
-Small pastes (<10 lines, <1000 chars): Pi never creates markers for small pastes — they stay inline in the typed text. These are invisible to segmentation and remain in the prompt.
+Pi creates a paste marker above 10 lines or 1000 chars, so a marker can stand for a very small paste. Capturing it is *not* free: the `[paste saved: …]` reference and the follow-up `read` tool call both cost tokens before any content arrives, and the read result then occupies context exactly like the inline paste would have — `read` has no result cache or dedupe, and nothing evicts it.
+
+The numbers below are **illustrative estimates** (roughly 3.5 chars/token for prose and code, tighter for hex paths) rather than tokenizer measurements; they are here to show the shape of the trade-off, not to predict a bill:
+
+| | estimated tokens |
+|---|---|
+| inline paste (~600 chars) | ~170 |
+| `[paste saved: <path>]` with a UUID | ~27 |
+| `read` tool call (the path is repeated in its JSON args) | ~44 |
+| tool result (same bytes as the paste) | ~170 |
+
+The consequence that matters: **a full read is never cheaper than the inline paste.** Capture only wins when the agent reads part of the paste — a `grep` that returns a handful of matching lines — instead of reading it whole. `PI_PASTEBOARD_MIN_PASTE_BYTES` (default 4 KiB) therefore keeps pastes below the size where selective reading is plausible inline, and bounds the downside when the agent reads everything anyway.
+
+Only *referenced* paste content counts toward the floor: typed text does not, and neither does a paste whose marker the user deleted, since it never reaches the model. The floor is **aggregate**, not per-paste — N small pastes that sum above it are captured even though each one alone would have been cheaper inline. Raise it if your prompts routinely carry many small pastes rather than one big one.
+
+Set `PI_PASTEBOARD_MIN_PASTE_BYTES=0` to capture every paste regardless of size (pre-threshold behaviour).
 
 ### Synchronous I/O latency
 
 Paste-segment files and the manifest are written **synchronously** inside the editor's `submitValue()` — the same call-path that runs the terminal render loop.  Each submission writes `N` paste files + one manifest.  On a local SSD with typical paste sizes (<1 MB each), this adds ~1–2 ms per file; a 5-paste submission might add <10 ms total, which is imperceptible.  On a slow or network filesystem the per-file latency could reach tens of milliseconds.
 
-To bound the worst case, the segmenter caps submissions at **50 segments** (files).  Exceeding the cap causes the patcher to fall back to v1 whole-input capture (one file).  This is a hard guardrail — the submission is NOT silently corrupted; the original markers expand normally and the v1 `input`-event handler captures the expanded text.
+To bound the worst case, the segmenter caps submissions at **`maxSegments`** parsed segments (default 50; typed and paste segments both count).  Exceeding the cap causes the patcher to fall back to v1 whole-input capture (one file).  This is a hard guardrail — the submission is NOT silently corrupted; the original markers expand normally and the v1 `input`-event handler captures the expanded text.
 
 ### Runtime field fragility
 
@@ -124,6 +204,7 @@ The v1 `input`-event handler passes input through unchanged when it is:
 
 - extension-sourced;
 - not interactive TUI (`rpc`, `json`, and `print` modes are bypassed);
+- already segmented by v2 (contains a `[paste saved: …]` reference), so the pastes are not captured twice;
 - below the size threshold;
 - a slash command or bang command;
 - likely to contain an `@` file reference;
@@ -138,7 +219,7 @@ These bypasses do not apply to v2 segmented capture — if the editor wrapper is
 - Files are mode `0600` (v2 submissions) or `0600` (v1) — readable only by the file owner.
 - The submission root (`/tmp/pi-pasteboard`) is mode `0700` — no other user can list contents.
 - Paste content is **never** logged or stored in Pi's session history. Only the `[paste saved: <path>]` reference appears in the prompt.
-- The manifest JSON records metadata (byte counts, timestamps, segment order) but does **not** include the text of typed segments longer than a few characters.
+- The manifest JSON records metadata only — byte/char counts, timestamps, segment order, paste file paths. It contains **no segment text at all**, typed or pasted.
 - Enable `PI_PASTEBOARD_DEBUG=1` only for troubleshooting — debug output includes file paths but still excludes paste content.
 
 ## Cleanup
@@ -176,8 +257,8 @@ npm run lint      # alias for typecheck
 ├── .cleanup.lock              # cleanup mutual-exclusion lock
 └── submissions/
     └── <uuid>/
-        ├── manifest.json      # segment metadata
-        ├── paste-0.txt        # paste segment files (0600)
-        ├── paste-1.txt
+        ├── manifest.json      # segment metadata (no segment text)
+        ├── paste-1.txt        # paste files, named by paste id (0600)
+        ├── paste-2.txt
         └── ...
 ```

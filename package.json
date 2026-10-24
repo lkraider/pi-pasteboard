@@ -32,6 +32,7 @@
   },
   "files": [
     "src",
+    "pi-pasteboard.schema.json",
     "README.md",
     "LICENSE",
     "package.json"

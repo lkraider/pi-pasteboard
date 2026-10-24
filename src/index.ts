@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { captureInput, extensionOptionsFromEnv } from "./capture.js";
+import { captureInput } from "./capture.js";
+import { resolveOptions } from "./config.js";
 import { cleanupOldPasteFiles, cleanupOldSubmissions } from "./pasteboard.js";
 import { patchEditorForSegmentedPaste } from "./pasteboard-editor.js";
 
@@ -10,15 +11,35 @@ import { patchEditorForSegmentedPaste } from "./pasteboard-editor.js";
 // unavailable, but v1 whole-input fallback remains active.
 
 export default function (pi: ExtensionAPI) {
-	const options = extensionOptionsFromEnv();
-	const debug = options.debug;
+	// Settings come from the config file, overlaid by environment variables.
+	// Resolved once here (so the input handler always has options) and again on
+	// every session_start, so a `/reload` or a new session picks up edits
+	// without restarting Pi.  Warnings are surfaced once the UI is available.
+	let config = resolveConfig();
+
+	function resolveConfig() {
+		const warnings: string[] = [];
+		const resolved = resolveOptions({ warn: (message: string) => warnings.push(message) });
+		return { ...resolved, warnings };
+	}
 
 	function debugLog(msg: string) {
-		if (!debug) return;
+		if (!config.options.debug) return;
 		console.error(`[pi-pasteboard:debug] ${msg}`);
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		config = resolveConfig();
+		const { options, configPath, configFound, warnings } = config;
+
+		debugLog(
+			configFound ? `config: ${configPath}` : `config: ${configPath} (not found; using defaults/env)`,
+		);
+		debugLog(`effective options: ${JSON.stringify(options)}`);
+		for (const warning of warnings) {
+			debugLog(`config warning: ${warning}`);
+			ctx.ui.notify(`pi-pasteboard: ${warning}`, "warning");
+		}
 		// Clean up old paste files and submission directories.
 		await cleanupOldPasteFiles(options).catch(() => undefined);
 		await cleanupOldSubmissions(options).catch(() => undefined);
@@ -63,7 +84,13 @@ export default function (pi: ExtensionAPI) {
 					editor = new CustomEditorClass(tui, theme, keybindings);
 				}
 
-				return patchEditorForSegmentedPaste(editor, { root: options.root });
+				return patchEditorForSegmentedPaste(editor, {
+					root: options.root,
+					minPasteBytes: options.minPasteBytes,
+					maxSegments: options.maxSegments,
+					annotatePasteSize: options.annotatePasteSize,
+					inlineFormat: options.inlineFormat,
+				});
 			});
 
 			// Let the user know which mode is active.  The notification is
@@ -94,7 +121,7 @@ export default function (pi: ExtensionAPI) {
 					mode: ctx.mode,
 					images: event.images,
 				},
-				options,
+				config.options,
 			);
 
 			if (result.action === "transform") {

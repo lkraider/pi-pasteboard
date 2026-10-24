@@ -214,3 +214,24 @@ test("captureInput returns continue for steer streaming behavior", async () => {
 	const tuiOk = getBypassReason({ text: "x".repeat(100), source: "interactive", mode: "tui" }, { minBytes: 10 });
 	assert.equal(tuiOk, undefined);
 });
+
+test("bypass: a v2 segmented submission is not re-captured by v1", () => {
+	// v2 already externalised the pastes.  If the remaining typed text is still
+	// above the v1 threshold, capturing it again would produce one file
+	// containing nothing but "[paste saved: …]" references.
+	const text = "x".repeat(40 * 1024) + "\n[paste saved: /tmp/pi-pasteboard/submissions/abc/paste-1.txt (500 lines, 18.2KB)]";
+	const reason = getBypassReason(
+		{ text, source: "interactive", mode: "tui" },
+		{ minBytes: 32 * 1024 },
+	);
+	assert.equal(reason, "already-segmented");
+	assert.equal(shouldCaptureInput({ text, source: "interactive", mode: "tui" }), false);
+});
+
+test("bypass: text that merely mentions pastes is still captured", () => {
+	const text = "x".repeat(40 * 1024) + "\nthis paragraph discusses paste handling";
+	assert.equal(
+		getBypassReason({ text, source: "interactive", mode: "tui" }, { minBytes: 32 * 1024 }),
+		undefined,
+	);
+});

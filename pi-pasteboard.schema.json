@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/lkraider/pi-pasteboard/main/pi-pasteboard.schema.json",
+  "title": "pi-pasteboard configuration",
+  "description": "Settings for the pi-pasteboard Pi extension. Every key is optional; environment variables of the same meaning take precedence over the file.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional reference to this schema, for editor autocomplete."
+    },
+    "root": {
+      "type": "string",
+      "minLength": 1,
+      "default": "/tmp/pi-pasteboard",
+      "description": "Directory holding captured paste files. Must be a current-user-owned directory, not a symlink. Overridden by PI_PASTEBOARD_ROOT."
+    },
+    "minBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 32768,
+      "description": "v1 whole-input capture threshold in bytes. Overridden by PI_PASTEBOARD_MIN_BYTES."
+    },
+    "minPasteBytes": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 4096,
+      "description": "v2 segmented capture floor: total referenced paste bytes below which pastes are left inline. 0 captures every paste. Overridden by PI_PASTEBOARD_MIN_PASTE_BYTES."
+    },
+    "maxSegments": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 50,
+      "description": "Maximum number of parsed segments (typed and paste) in one submission; above it v2 declines and falls back to v1 whole-input capture. Overridden by PI_PASTEBOARD_MAX_SEGMENTS."
+    },
+    "ttlMs": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 604800000,
+      "description": "Retention period for captured files, in milliseconds. Overridden by PI_PASTEBOARD_TTL_MS."
+    },
+    "debug": {
+      "type": "boolean",
+      "default": false,
+      "description": "Emit debug-level diagnostics to stderr. Overridden by PI_PASTEBOARD_DEBUG (0/false/no/off disables)."
+    },
+    "inlineFormat": {
+      "type": "string",
+      "enum": [
+        "stock",
+        "spaced"
+      ],
+      "default": "spaced",
+      "description": "Layout of a paste that stays inline (below minPasteBytes). \"stock\" = Pi's in-place expansion; \"spaced\" = its own block with a blank line either side. Overridden by PI_PASTEBOARD_INLINE_FORMAT."
+    },
+    "annotatePasteSize": {
+      "type": "boolean",
+      "default": true,
+      "description": "Append \"(812 lines, 45.6KB)\" to each [paste saved: ...] reference so the model can choose grep over a full read. Overridden by PI_PASTEBOARD_ANNOTATE_SIZE."
+    }
+  }
+}

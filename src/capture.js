@@ -1,18 +1,9 @@
-import { DEFAULT_MIN_BYTES, DEFAULT_ROOT, DEFAULT_TTL_MS, readPositiveIntegerEnv } from "./constants.js";
+import { DEFAULT_MIN_BYTES, DEFAULT_ROOT, DEFAULT_TTL_MS } from "./constants.js";
 import { getBypassReason } from "./bypass.js";
 import { cleanupOldPasteFiles, writePasteText } from "./pasteboard.js";
 
 export function makeReferenceInstruction(path) {
 	return `Large input captured at ${path}. Read that file if needed; do not ask the user to paste it again.`;
-}
-
-export function extensionOptionsFromEnv() {
-	return {
-		root: process.env.PI_PASTEBOARD_ROOT || DEFAULT_ROOT,
-		minBytes: readPositiveIntegerEnv("PI_PASTEBOARD_MIN_BYTES", DEFAULT_MIN_BYTES),
-		ttlMs: readPositiveIntegerEnv("PI_PASTEBOARD_TTL_MS", DEFAULT_TTL_MS),
-		debug: !!process.env.PI_PASTEBOARD_DEBUG,
-	};
 }
 
 export async function captureInput(input, options = {}) {

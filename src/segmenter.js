@@ -1,7 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { DEFAULT_ROOT, MAX_SEGMENTS, PASTE_MARKER_RE, SUBMISSIONS_SUBDIR } from "./constants.js";
+import {
+	DEFAULT_ANNOTATE_PASTE_SIZE,
+	DEFAULT_MAX_SEGMENTS,
+	DEFAULT_ROOT,
+	PASTE_MARKER_RE,
+	SUBMISSIONS_SUBDIR,
+} from "./constants.js";
+import { describePaste } from "./format.js";
 
 /**
  * Parse paste-marker-bearing text into ordered segments.
@@ -63,22 +70,51 @@ export function parseSegments(markerText, pastes) {
  *
  * @param {string} markerText  Raw editor text with unexpanded paste markers.
  * @param {Map<number,string>} pastes  Runtime paste-id → content Map.
- * @param {{root?:string}} [options]
+ * @param {{root?:string, minPasteBytes?:number, maxSegments?:number, annotatePasteSize?:boolean}} [options]
+ *   `minPasteBytes` is a size floor below which no files are written (returns
+ *   `error: "below-min-paste-bytes"`); it defaults to 0 because the floor is a
+ *   policy decision owned by the caller, not by segmenting itself.
+ *   `maxSegments` bounds the synchronous writes this call performs and defaults
+ *   to DEFAULT_MAX_SEGMENTS.  `annotatePasteSize` appends "812 lines, 45.6KB"
+ *   to each reference so the model can choose grep over a full read.
  * @returns {{transformedText:string, submissionId:string, submissionDir:string, manifest:object}}
  */
 export function processSegmentedPastes(markerText, pastes, options = {}) {
 	const root = options.root ?? DEFAULT_ROOT;
+	const minPasteBytes = options.minPasteBytes ?? 0;
+	const maxSegments = options.maxSegments ?? DEFAULT_MAX_SEGMENTS;
+	const annotatePasteSize = options.annotatePasteSize ?? DEFAULT_ANNOTATE_PASTE_SIZE;
 	const segments = parseSegments(markerText, pastes);
 
 	// Guardrail: refuse to write an excessive number of segment files
 	// synchronously (which would block the terminal render loop).
 	// Past the cap the editor patcher falls back to v1 whole-input capture.
-	if (segments.length > MAX_SEGMENTS) {
+	if (segments.length > maxSegments) {
 		return {
 			transformedText: null,
 			error: "too-many-segments",
 			segmentCount: segments.length,
-			maxAllowed: MAX_SEGMENTS,
+			maxAllowed: maxSegments,
+			segments,
+		};
+	}
+
+	// Optional size floor: below it, writing a file and handing the model a
+	// reference costs more tokens than leaving the paste inline.  Only
+	// referenced paste segments count — a paste whose marker the user deleted
+	// never reaches the model, so it is not worth a file either.
+	const pasteBytes = segments.reduce(
+		(sum, seg) => sum + (seg.kind === "paste" ? Buffer.byteLength(seg.text ?? "", "utf8") : 0),
+		0,
+	);
+	if (pasteBytes < minPasteBytes) {
+		return {
+			transformedText: null,
+			error: "below-min-paste-bytes",
+			pasteBytes,
+			minPasteBytes,
+			segmentCount: segments.length,
+			segments,
 		};
 	}
 
@@ -100,21 +136,32 @@ export function processSegmentedPastes(markerText, pastes, options = {}) {
 
 		if (seg.kind === "typed") {
 			transformedParts.push(seg.text);
+			// Metadata only: the manifest is a sidecar, and duplicating the
+			// user's typed prompt onto disk (beyond the paste files they asked
+			// to save) is not part of the bargain.
 			manifest.segments.push({
 				index: i,
 				kind: "typed",
-				text: seg.text,
+				chars: seg.text.length,
+				bytes: Buffer.byteLength(seg.text, "utf8"),
 			});
 		} else {
 			// paste — write to file, replace marker with reference
-			const pasteFile = join(submissionDir, `paste-${i}.txt`);
+			// Named by paste id, not segment index: the marker the user sees is
+			// "[paste #3 …]", so the file it becomes should say 3.  Segment
+			// indices skip numbers (typed segments occupy 0, 2, 4 …), which made
+			// references look like they were missing files.
+			const pasteFile = join(submissionDir, `paste-${seg.pasteId}.txt`);
 			const content = seg.text || "";
 			const bytes = Buffer.byteLength(content, "utf8");
 			const lines = content ? content.split("\n").length : 0;
 
 			writeFileSync(pasteFile, content, { mode: 0o600 });
 
-			transformedParts.push(`[paste saved: ${pasteFile}]`);
+			const reference = annotatePasteSize
+				? `[paste saved: ${pasteFile} (${describePaste(bytes, lines)})]`
+				: `[paste saved: ${pasteFile}]`;
+			transformedParts.push(reference);
 
 			const entry = {
 				index: i,
